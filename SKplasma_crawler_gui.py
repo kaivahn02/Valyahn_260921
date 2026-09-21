@@ -65,22 +65,24 @@ def render_search_page(search_url):
         driver.quit()
 
 
-def find_title(news_link_tag):
-    """네이버뉴스 링크에서 상위로 올라가며 원문 기사 링크의 제목 텍스트를 찾는다."""
-    node = news_link_tag
-    for _ in range(8):
-        node = node.parent
-        if node is None:
+def find_nav_link(title_a, max_levels=6):
+    """제목 링크(data-heatmap-target=".tit")와 같은 항목에 속한
+    네이버뉴스 링크(data-heatmap-target=".nav")를 찾는다.
+
+    검색 결과의 각 기사 항목은 상위 컨테이너 안에 data-sds-comp="Profile"
+    div(출처/시간/네이버뉴스 링크)를 직계 자식으로 가진다. 이 Profile을
+    찾을 때까지만 상위로 올라가고, 그 이상은 확장하지 않는다 — 그렇지
+    않으면 옆에 있는 다른 기사의 네이버뉴스 링크를 잘못 가져오게 된다.
+    """
+    node = title_a
+    for _ in range(max_levels):
+        parent = node.parent
+        if parent is None:
             return None
-        candidates = [
-            a for a in node.find_all("a")
-            if a.get("href") and "naver.com" not in a.get("href") and a.get("href") != "#"
-        ]
-        texts = [a.get_text(strip=True) for a in candidates]
-        texts = [t.replace("새 창 열림", "").strip() for t in texts if t]
-        texts = [t for t in texts if t]
-        if texts:
-            return texts[0]
+        profile = parent.find("div", attrs={"data-sds-comp": "Profile"}, recursive=False)
+        if profile is not None:
+            return profile.select_one('a[data-heatmap-target=".nav"]')
+        node = parent
     return None
 
 
@@ -90,12 +92,18 @@ def collect_news_items(search_url):
 
     items = []
     seen_urls = set()
-    for a in soup.select('a[href*="n.news.naver.com/mnews/article"]'):
-        url = a.get("href")
+    for title_a in soup.select('a[data-heatmap-target=".tit"]'):
+        nav_a = find_nav_link(title_a)
+        if nav_a is None:
+            continue  # 네이버뉴스로 제공되지 않는 기사는 본문을 가져올 수 없어 제외
+
+        url = nav_a.get("href")
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        items.append({"title": find_title(a) or "(제목 없음)", "url": url})
+
+        title = title_a.get_text(strip=True).replace("새 창 열림", "").strip()
+        items.append({"title": title or "(제목 없음)", "url": url})
     return items
 
 
