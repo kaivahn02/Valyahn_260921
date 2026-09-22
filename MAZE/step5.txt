@@ -1,0 +1,115 @@
+[작업 로그 — Step 5: 몬스터 시스템 추가 (추적, 밀치기/넉백, 방패 이펙트)]
+
+이전 단계(step4.txt) 이후 진행한 작업 요약. 층별로 스폰되는 몬스터,
+플레이어 근접 추적, 밀치기(넉백)를 통한 몬스터 제거/스턴, 방패 이펙트를 추가했다.
+
+새로 추가된 파일
+- src/monster.py
+
+변경된 파일
+- src/settings.py (몬스터 관련 상수 추가)
+- src/player.py (몬스터 충돌/밀치기 트리거 로직 추가)
+- src/game.py (몬스터 스폰/업데이트/밀치기 처리/렌더링 통합)
+
+1) src/monster.py (신규)
+- monster_count_for_floor(floor): 요청하신 공식 그대로 구현.
+  * floor <= 20: blocks=(floor-1)//3, count = 2+blocks (1~3층=2, 4~6층=3, 7~9층=4 ...)
+  * floor > 20: base=monster_count_for_floor(20), extra_blocks=(floor-21)//3+1,
+    count = base + extra_blocks*2 (21층부터 3층마다 2마리씩 증가)
+  * 검증: 1~9층 표 그대로 일치, floor=20 -> 8마리(base), 21~23층 10마리,
+    24~26층 12마리, 27~29층 14마리 확인.
+- Monster 클래스: col/row(타일 좌표), state("idle"/"chasing"/"stunned"),
+  stun_end_time, last_move_time 보유.
+  * update(player, grid, monsters, now): stunned면 스턴 종료 시각 전까지 아무것도
+    안 함(스턴 종료되면 idle로 복귀). 플레이어와의 맨해튼 거리가 5칸(MONSTER_CHASE_RADIUS)
+    이내면 "chasing" 상태로 전환하고, 이동 쿨다운(180ms, MONSTER_MOVE_COOLDOWN_MS)이
+    지났으면 플레이어 방향으로 한 칸 이동 시도. 5칸 밖이면 "idle"로 전환하고 제자리 유지.
+  * 이동 방향 선택: 플레이어와의 col/row 차이 중 더 큰 축을 우선 시도하고, 막히면
+    (벽/다른 몬스터/플레이어 칸) 나머지 축을 시도. 둘 다 막히면 이번 틱은 이동 안 함
+    (완벽한 경로탐색은 아니고 단순 그리디 추적).
+
+2) src/settings.py — 몬스터 관련 상수 추가
+- MONSTER_MOVE_COOLDOWN_MS = 180
+- MONSTER_CHASE_RADIUS = 5
+- MONSTER_MIN_DIST_FROM_ENTRANCE = 4, MONSTER_MIN_DIST_BETWEEN = 2 (스폰 규칙용)
+- MONSTER_BASE_COUNT=2, MONSTER_BLOCK_FLOORS=3, MONSTER_HIGH_FLOOR_THRESHOLD=20,
+  MONSTER_HIGH_FLOOR_STEP=2 (monster_count_for_floor 계산용)
+- KNOCKBACK_DISTANCE = 5, MONSTER_STUN_MS = 220, SHIELD_EFFECT_MS = 150
+- COLOR_MONSTER(빨강), COLOR_MONSTER_STUNNED(어두운 빨강), COLOR_SHIELD(밝은 흰색 계열)
+
+3) src/player.py — 몬스터 충돌 처리
+- Player에 facing(바라보는 방향) 속성 추가, 이동을 시도할 때마다 갱신.
+- try_move(dx, dy, grid, monsters, now_ms, on_push)로 시그니처 변경(monsters, on_push 추가).
+  * 벽이면 기존처럼 무시.
+  * 목적지 칸에 몬스터가 있으면: 플레이어는 이동하지 않고 제자리 유지, 대신
+    on_push(target_monster, dx, dy, now_ms) 콜백을 호출해 밀치기를 발동시킴
+    (이동 쿨다운은 이 경우에도 갱신되어 밀치기도 하나의 "행동"으로 취급됨).
+  * 몬스터가 없으면 기존처럼 정상 이동.
+
+4) src/game.py — 스폰/업데이트/밀치기/렌더링
+- _generate_floor()에서 미로 생성 후 _spawn_monsters() 호출.
+  * monster_count_for_floor(self.floor)만큼, 입구(1,1)에서 맨해튼 거리
+    4칸 이상 떨어지고 출구 칸이 아닌 통로 칸 중에서 무작위로 후보를 섞은 뒤,
+    이미 배치된 몬스터들과 맨해튼 거리 2칸 이상 떨어진 위치에만 순서대로 배치.
+  * 층이 바뀔 때마다(또는 R키로 재생성할 때마다) self.monsters를 새로 만들므로
+    이전 층 몬스터는 자동으로 전부 제거되고 새로 스폰됨.
+- _update()에서 이동 처리 시 self.player.try_move(...)에 self.monsters와
+  self._push_monster 콜백을 전달. 그 후 살아있는 모든 몬스터에 대해
+  monster.update(player, grid, monsters, now) 호출(게임오버/전환 중엔 실행 안 됨).
+- _push_monster(monster, dx, dy, now): 밀치는 방향으로 최대 5칸(KNOCKBACK_DISTANCE)까지
+  한 칸씩 이동 가능 여부(벽/다른 몬스터/플레이어 칸에 막히는지)를 검사하며 최대한 밀어냄.
+  * 5칸을 전부 밀어냈으면(안 막혔으면) -> state="stunned", stun_end_time = now + 220ms
+  * 중간에 막혔으면(5칸 다 못 감) -> self.monsters에서 즉시 제거(소멸)
+  * 어느 경우든 밀치기가 발동한 순간 shield_effect_dir/shield_effect_until을 설정.
+- 방패 이펙트: _draw_shield_effect()라는 별도 메서드로 분리. 밀치기가 발동한 순간부터
+  150ms(SHIELD_EFFECT_MS) 동안, 플레이어가 미는 방향(=바라보는 방향) 바로 앞 칸에
+  테두리 사각형을 그림. 지금은 색상 도형이지만, 나중에 스프라이트로 바꿀 때 이
+  함수만 교체하면 되도록 렌더링 로직을 전부 이 함수 안에 격리해둠.
+- 몬스터 렌더링: _draw_monster()에서 상태에 따라 색을 달리함
+  (평소/추적 중: COLOR_MONSTER 빨강, stunned: COLOR_MONSTER_STUNNED 어두운 빨강).
+  플레이어보다 먼저(아래 레이어에) 그리고, 그 위에 플레이어 → 방패 이펙트 순으로 렌더링.
+
+검증 (SDL_VIDEODRIVER=dummy 헤드리스 환경, 실제 코드 그대로 구동)
+가) monster_count_for_floor 단위 테스트: 1~9층 스펙 표, 20층 base=8,
+   21~29층 고층 구간(10/12/14) 전부 스펙과 정확히 일치 확인.
+나) 스폰 규칙: 1/5/10/15층에서 스폰된 몬스터 수가 계산값 이하인지, 출구 칸 제외,
+   입구에서 최소 4칸 이상 떨어졌는지, 벽 위에 스폰되지 않았는지, 몬스터끼리
+   최소 2칸 이상 떨어졌는지 전부 확인.
+다) 층 전환(또는 R키 재생성) 시 이전 몬스터 인스턴스가 전부 교체되는지(id 비교) 확인.
+라) 추적 범위: 거리 3칸 몬스터는 "chasing", 거리 7칸 몬스터는 "idle" 확인.
+마) 추적 이동: 쿨다운 경과 후 플레이어 쪽으로 정확히 한 칸 이동하는지 확인.
+바) stunned 상태에서는 이동/추적이 전혀 발생하지 않고, 스턴 시간 경과 후
+   자동으로 idle로 복귀하는지 확인.
+사) 밀치기 성공 케이스: 5칸이 뻥 뚫려 있으면 정확히 5칸 이동 후 stunned로 전환되고
+   목록에서 제거되지 않는지 확인.
+아) 밀치기 실패 케이스: 밀리는 도중 벽에 막히면 해당 몬스터가 즉시 목록에서
+   제거(소멸)되는지 확인.
+자) 플레이어가 몬스터 쪽으로 이동을 시도하면 플레이어 위치는 그대로 유지되고,
+   shield_effect_dir/until이 올바르게 설정되는지 확인.
+차) 기존 step2~4의 층 전환/최고 기록 전체 회귀 테스트를 몬스터 시스템이 들어간
+   상태에서 다시 실행 -> 전부 통과(회귀 테스트에서는 몬스터가 경로를 막지 않도록
+   BFS 이동 직전 self.monsters=[]로 격리해 순수 층 전환/기록 로직만 재검증).
+카) 스크린샷으로 실제 렌더링 확인: 몬스터 3마리가 빨간 사각형으로 정상 표시,
+   stunned 몬스터가 어두운 빨강으로 구분되어 표시, 플레이어가 몬스터 방향으로
+   이동 시도 시 제자리 유지 + 몬스터가 오른쪽으로 5칸 밀려나며 stunned로 바뀌고
+   플레이어 앞 칸에 흰 테두리 방패 이펙트가 표시되는 것을 육안으로 확인.
+
+발견된 이슈와 처리
+- 초기 구현에서 _push_monster가 내부적으로 pygame.time.get_ticks()를 다시 호출하도록
+  했었는데, 테스트에서 호출 시점의 실제 시각과 try_move에 전달한 시뮬레이션용 now_ms가
+  어긋나 방패 이펙트 타이머 검증이 실패했음. 실제 게임 루프에서는 두 값이 같은 프레임
+  안에서 호출되어 사실상 문제가 되지 않지만(밀리초 단위 오차조차 거의 없음), 일관성과
+  테스트 용이성을 위해 on_push 콜백에 now_ms를 함께 전달하도록 수정
+  (Player.try_move -> on_push(target, dx, dy, now_ms) -> Game._push_monster(..., now)).
+  이 수정으로 시간 값 불일치 가능성 자체를 제거함.
+
+기존 기능 유지 확인
+- 층 전환(_generate_floor, in_transition), 최고 기록 저장/로드, 결과 화면(game_over),
+  R키 재생성 등 이전 단계 기능은 변경 없이 그대로 동작함(위 '차' 항목 회귀 테스트로 확인).
+
+기타
+- 테스트 중 생성된 highscore.json은 실제 기록이 아니므로 작업 종료 후 삭제함.
+- 여전히 미구현 상태로 남아있는 항목: 플레이어 체력/데미지(현재 몬스터는 플레이어를
+  직접 공격하지 못하고, 플레이어가 부딪히면 항상 몬스터 쪽이 밀려나거나 소멸함 —
+  즉 아직 "플레이어가 위험해지는" 요소는 없음), 아이템/인벤토리, 스프라이트,
+  FOV/안개, 정식 unit test 스위트(수동 스크립트 검증만 존재) 등.

@@ -1,0 +1,54 @@
+[작업 로그 — Step 2: 출구 도달 -> 다음 층 이동 구조로 변경]
+
+이전 단계(step1.txt) 이후 진행한 작업 요약. "탈출 성공 후 게임 종료" 구조를
+"층을 계속 내려가는(올라가는) 던전 크롤러형 진행 구조"로 교체했다.
+
+변경된 파일
+- src/settings.py
+- src/game.py
+
+1) src/settings.py — 새 상수 추가
+- MAZE_GROWTH_PER_FLOORS = 2       (몇 층마다 미로가 커질지)
+- MAZE_GROWTH_AMOUNT = 2           (커질 때 가로/세로 각각 증가량)
+- MAX_MAZE_COLS = 41, MAX_MAZE_ROWS = 31  (미로 크기 상한, 무한정 커지지 않게 캡)
+- FLOOR_MESSAGE_MS = 1000          ("N층 도착!" 안내 문구 노출 시간)
+
+2) src/game.py — 구조 변경
+- self.cleared(게임 완전 종료 플래그) 제거.
+  대신 self.floor(현재 층수, 1부터 시작), self.in_transition(층 전환 중 여부),
+  self.transition_end_time(전환 종료 시각), self.next_floor(전환 후 도착할 층수) 도입.
+- 기존 _new_maze()를 _generate_floor()로 개명하고, 층수(self.floor)에 따라
+  _maze_size_for_floor()로 계산한 크기로 미로를 생성하도록 변경.
+  * 크기 계산식: growth_steps = (floor-1)//MAZE_GROWTH_PER_FLOORS
+               growth = growth_steps * MAZE_GROWTH_AMOUNT
+               cols/rows = min(기본값 + growth, MAX_MAZE_COLS/ROWS)
+  * 즉 1~2층은 기본 크기(21x15), 3~4층은 23x17, 5~6층은 25x19 ... 식으로
+    2층 단위로 가로세로 +2, MAX 크기(41x31)에서 더 이상 커지지 않음.
+- 출구 도달 처리(_update 내부):
+  1. 플레이어가 exit_pos에 도달하면 즉시 이동 불가 상태(in_transition=True)로 전환하고
+     next_floor = floor + 1 로 설정, transition_end_time = 현재시각 + 1000ms 로 예약.
+  2. in_transition 동안에는 키 입력을 무시(이동 정지)하고, 화면 중앙에
+     "{next_floor}층 도착!" 큰 텍스트를 표시.
+  3. transition_end_time이 지나면 self.floor = next_floor로 갱신하고
+     _generate_floor()를 호출해 새 미로 생성 + in_transition 해제.
+- _generate_floor()는 매번 플레이어를 (1,1) 입구 위치로 리셋하고, 새 exit_pos를
+  탐색(우측 하단 통로 칸)하며, 화면 중앙 정렬용 offset도 새 미로 크기에 맞춰 재계산.
+- 화면 좌상단에 "현재 층: N" 텍스트 상시 표시 추가.
+- R키(새 미로 생성)는 그대로 유지하되, 현재 층수는 바꾸지 않고 같은 층 크기로
+  미로만 다시 생성하도록 동작(층 진행과 별개의 "재시도" 기능으로 남겨둠).
+
+검증
+- SDL_VIDEODRIVER=dummy 헤드리스 환경에서 스모크 테스트 스크립트로 확인:
+  플레이어를 강제로 exit_pos에 이동시키고 _update()를 반복 호출하며
+  1층 -> 7층까지 전환, 매 전환마다 미로 크기가 2층 단위로 커지는지
+  (15x21 -> 17x23 -> 19x25 -> 21x27), 전환 후 플레이어가 (1,1)로 리셋되는지,
+  in_transition 플래그가 정상적으로 켜졌다 꺼지는지 assert로 확인. 전부 통과.
+
+현재 상태로 남아있는 제약/미결정 사항 (이전 step1.txt와 동일하게 유효)
+- 전투/몬스터/아이템/인벤토리 없음
+- 스프라이트 없음(색상 도형)
+- 시야(FOV)/안개 없음
+- 세이브/로드, 타이틀/게임오버 화면 없음
+- 미로가 MAX 크기(41x31)에 도달한 뒤에도 층수는 계속 올라가고 크기만 고정됨
+  (원한다면 이후 난이도 요소를 다른 방식으로 올릴 필요 있음 — 예: 몬스터 수 증가 등)
+- 테스트는 수동 스모크 테스트만 존재, 정식 unit test 없음

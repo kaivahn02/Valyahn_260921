@@ -1,0 +1,93 @@
+[작업 로그 — Step 3: 최고 기록(최고 도달 층수) 시스템 추가]
+
+이전 단계(step2.txt) 이후 진행한 작업 요약. 게임에 최고 기록 저장/불러오기,
+HUD 표시, ESC를 눌렀을 때의 결과 화면(신기록 이름 입력 포함) 흐름을 추가했다.
+
+새로 추가된 파일
+- src/highscore.py
+
+변경된 파일
+- src/settings.py
+- src/game.py
+- .gitignore (highscore.json 추가 — 플레이어별 로컬 저장 데이터라 버전관리 제외)
+
+1) src/highscore.py (신규)
+- HIGHSCORE_PATH: 프로젝트 루트(MAZE/highscore.json)를 가리키는 절대경로.
+  (assets 대신 프로젝트 루트에 저장 — 세이브 데이터라 리소스 폴더와 분리)
+- load_highscore(): 파일 없거나 JSON 파싱 실패/형식 오류 시
+  기본값 {"best_floor": 0, "name": "-"} 반환. 있으면 best_floor(int)/name(str) 정규화해서 반환.
+- save_highscore(best_floor, name): {"best_floor": ..., "name": ...} 형태로
+  UTF-8, 한글 그대로(ensure_ascii=False) 저장하고 저장된 dict를 반환.
+
+2) src/settings.py
+- HIGHSCORE_NAME_MAX_LEN = 10 상수 추가 (이름 입력 최대 길이)
+
+3) src/game.py
+가) 초기화
+- Game.__init__에서 self.highscore = load_highscore()로 시작 시 기록 로드.
+- self.game_over, self.is_new_record, self.name_input 상태 추가.
+  (기존 floor/in_transition 로직은 그대로 유지, 완전히 별도 상태로 분리)
+
+나) HUD (_draw)
+- 좌상단: "현재 층: N" (기존 유지)
+- 우상단: "최고 기록: M층 (이름)" 신규 추가 (self.highscore 기준, 상시 표시)
+
+다) ESC 흐름 변경
+- 기존: ESC -> self.running = False (즉시 종료)
+- 변경: ESC -> _enter_game_over() 호출
+  - self.game_over = True
+  - self.is_new_record = (현재 floor > highscore['best_floor'])
+  - 신기록이면 pygame.key.start_text_input()으로 텍스트 입력 모드 시작,
+    name_input 초기화
+
+라) 결과 화면 이벤트 처리 (_handle_game_over_event)
+- game_over 상태에서는 _handle_events가 다른 입력(R, 이동)을 전혀 처리하지 않고
+  전부 이 메서드로 위임.
+- 신기록인 경우:
+  - pygame.TEXTINPUT 이벤트로 문자 추가 (한글 조합 포함, 영문/숫자/한글 모두
+    TEXTINPUT을 통해 들어오므로 자동 지원됨). 최대 10자(HIGHSCORE_NAME_MAX_LEN) 제한.
+  - Backspace: 마지막 글자 삭제
+  - Enter/Numpad Enter: _confirm_new_record() 호출
+    -> 입력한 이름 strip, 비어있으면 "-"로 대체 -> save_highscore()로 저장
+       -> self.highscore 갱신 -> text_input 종료 -> self.running = False (게임 종료)
+  - ESC: 저장하지 않고 바로 종료 (편의 기능으로 추가, 스펙 외 추가사항)
+- 신기록이 아닌 경우:
+  - 아무 KEYDOWN 이벤트에나 self.running = False (즉시 종료)
+
+마) 결과 화면 렌더링 (_draw_game_over, 신규)
+- 중앙에 "도달 층수: N층" 큰 글씨로 표시
+- 신기록인 경우: "신기록!" 문구 + 안내 문구 + 입력창(사각형 박스)에
+  현재 name_input 실시간 표시
+- 신기록이 아닌 경우: "최고 기록: M층 (이름)" + "아무 키나 눌러 종료" 안내
+
+바) 기존 동작 유지 확인
+- _update()는 self.game_over일 때 맨 위에서 즉시 return 하도록 하여
+  in_transition/이동 로직에 전혀 영향을 주지 않음 (요청사항대로 유지).
+- game_over가 아닐 때는 R키로 미로만 재생성하는 기존 동작 그대로 유지.
+
+검증 (SDL_VIDEODRIVER=dummy 헤드리스 환경)
+- highscore.json 미존재 시 기본값(0, "-")으로 시작하는지 확인
+- ESC로 game_over 진입 시 floor(1) > best_floor(0) 이므로 is_new_record=True 확인
+- TEXTINPUT 이벤트로 "Kai" 입력 -> Backspace로 "Ka" -> "i" 재입력 -> Enter로 확정
+  -> highscore.json에 {"best_floor": 1, "name": "Kai"} 정상 저장 확인
+- 새 Game 인스턴스 생성 시 저장된 기록(1층, Kai)을 정상적으로 불러오는지 확인
+- 같은 층수(1층)로 재도전 시 is_new_record=False로 판정되고, 아무 키나 누르면
+  종료되며 highscore.json이 변경되지 않는지 확인 (기존 기록보다 "낮거나 같으면"
+  갱신 안 함 — 스펙 그대로 구현)
+- 이름 입력 10자 제한이 11번째 글자부터 무시되는지 확인
+- game_over 상태에서 _update() 호출 시 grid/player 등에 아무 변화가 없는지(이동/R 무시) 확인
+- _draw() / _draw_game_over()(신기록 화면, 비신기록 화면 모두) 예외 없이 렌더링되는지 확인
+- 테스트 중 생성된 highscore.json은 실제 플레이 기록이 아니므로 작업 종료 후 삭제함
+  (다음 실행 시 다시 기본값 0/"-"로 시작)
+
+주의/제약 사항
+- 폰트는 여전히 pygame.font.SysFont(None, ...) 기본 폰트를 사용 중입니다.
+  환경에 따라 한글 글리프가 깨지거나 네모(tofu)로 보일 수 있습니다
+  (이전 단계부터 있던 기존 한계이며 이번 작업 범위에서 폰트 교체는 하지 않음 —
+  필요 시 assets/fonts에 한글 지원 폰트 파일을 추가하고
+  pygame.font.Font(경로, 크기)로 교체하는 작업이 별도로 필요함).
+- highscore.json은 .gitignore에 추가하여 버전관리에서 제외함
+  (플레이어 로컬 저장 데이터이기 때문).
+- 여전히 미구현 상태로 남아있는 항목(이전 step들과 동일): 몬스터/전투,
+  아이템/인벤토리, 스프라이트, FOV/안개, 세이브 슬롯 다중 지원, 타이틀 화면,
+  정식 unit test 등.
